@@ -46,7 +46,7 @@ void LogError(const char *str) {
 }
 
 void ParserLog(std::string str) {
-	std::cout << str;
+	std::cout << "Parser " << str << std::endl;
 }
 
 class ExprAST {
@@ -75,7 +75,9 @@ public:
 	Value* codegen()
 	{
 		Value* V = NamedValues[Name];
-		std::cout << "VariableExprAST::codegen() " << Name;
+		std::string msg = "VariableExprAST::codegen() ";
+		msg += Name;
+		ParserLog(msg);
 		if (!V)
 			LogError("Unknown variable name");
 		return V;
@@ -230,7 +232,7 @@ public:
 	
 	Function* codegen()
 	{
-		
+		ParserLog("Function.codegen()");
 		Function* TheFunction = TheModule->getFunction(Proto->getName());
 		
 		if (!TheFunction)
@@ -247,7 +249,7 @@ public:
 		
 		NamedValues.clear();
 		for (auto &Arg : TheFunction->args()) {
-			fprintf(stderr, "Adding auryment to NamedValues %s",std::string(Arg.getName()).c_str());
+			fprintf(stderr, "Adding aurgument to NamedValues %s",std::string(Arg.getName()).c_str());
 			NamedValues[Arg.getName()] = &Arg;
 		}
 		
@@ -262,6 +264,71 @@ public:
 		
 		TheFunction->eraseFromParent();
 		return nullptr;
+	}
+};
+
+class IfExprAST : public ExprAST {
+	std::unique_ptr<ExprAST> Cond, Then, Else;
+	
+	public:
+	IfExprAST(std::unique_ptr<ExprAST> _Cond, std::unique_ptr<ExprAST> _Then, std::unique_ptr<ExprAST> _Else)
+	 : Cond(std::move(_Cond)),Then(std::move(_Then)),Else(std::move(_Else)) {}
+	
+	Value* codegen()
+	{
+		Value *CondV = Cond->codegen(); 
+		if (!CondV)
+			return nullptr;
+		
+		CondV = Builder.CreateFCmpONE(CondV, ConstantFP::get(TheContext, APFloat(0.0)), "ifcond");
+		
+		Function *TheFunction = Builder.GetInsertBlock()->getParent();
+		
+		BasicBlock *ThenBB = BasicBlock::Create(TheContext, "then", TheFunction);
+		BasicBlock *ElseBB = BasicBlock::Create(TheContext, "else");
+		BasicBlock *MergeBB = BasicBlock::Create(TheContext, "ifcont");
+		
+		Builder.CreateCondBr(CondV, ThenBB, ElseBB);
+		
+		//set insert point to ThenBB
+		Builder.SetInsertPoint(ThenBB);
+		
+		//codegen ThenBB
+		Value *ThenV = Then->codegen();
+		if (!ThenV)
+			return nullptr;
+		
+		//add branch to MergeBB
+		Builder.CreateBr(MergeBB);
+		
+		ThenBB = Builder.GetInsertBlock();
+		
+		TheFunction->getBasicBlockList().push_back(ElseBB);
+		//set insert point to ElseBB
+		Builder.SetInsertPoint(ElseBB);
+		
+		//codegen ElseBB
+		Value *ElseV = Else->codegen();
+		
+		if (!ElseV)
+			return nullptr;
+		
+		//add branch to MergeBB
+		Builder.CreateBr(MergeBB);
+		
+		ElseBB = Builder.GetInsertBlock();
+		TheFunction->getBasicBlockList().push_back(MergeBB);
+		
+		//set insert point to MergeBB
+		Builder.SetInsertPoint(MergeBB);
+		
+		//add phi to merge values from ThenBB and ElseBB
+		PHINode *PN = Builder.CreatePHI(Type::getDoubleTy(TheContext), 2, "iftmp");
+		
+		PN->addIncoming(ThenV, ThenBB);
+		PN->addIncoming(ElseV, ElseBB);
+		
+		return PN;
 	}
 };
 
@@ -286,7 +353,7 @@ class Parser {
         return nullptr;
     }
 
-    int GetPrecedence(char op)
+    /*int GetPrecedence(char op)
     {
         if (!isascii(op))
             return -1;
@@ -295,14 +362,16 @@ class Parser {
         if (tokPrec <= 0)
             return -1;
         return tokPrec;
-    }
+    }*/
 
     //sets member 'nextToken' so the next token is visible to the main loop when getNextToken is called by one of the 'ParseIdentifierExpr' type functions
     tokStruct getNextToken() {
 		ParserLog("Parser getNextToken: ");
         m_curToken = lex.getTok();
-        ParserLog("Parser getNextToken: ");
-		ParserLog("Parser getNextToken.unknownChar ");
+		std::string msg = "curToken.unknownChar ";
+		msg += m_curToken.unknownChar;
+        ParserLog(msg);
+		
         return m_curToken;
     }
 
@@ -401,6 +470,12 @@ class Parser {
             return ParseNumberExpr();
         else if ((m_curToken.tok == lexer::tok_unknown) && (m_curToken.unknownChar == '('))
             return ParseParenExpr();
+		else if (m_curToken.tok == lexer::tok_if)
+			return ParseIfExpr();
+		else if (m_curToken.tok == lexer::tok_then)
+			return ParseIfExpr();
+		else if (m_curToken.tok == lexer::tok_else)
+			return ParseIfExpr();
         else {
             LogError("Unknown type of expression");
             return nullptr;
@@ -420,14 +495,17 @@ class Parser {
     int getTokPrecedence(tokStruct curToken)
     {
         //check if it is a binary operator
+		
         if (!isBinaryOperator(curToken))
 		{
+		
 			ParserLog("Not a binary operator");
             return -1;
 		}
-
+		
         int TokPrec = BinopPrecedence[curToken.unknownChar];
-
+		
+		
         if (TokPrec <= 0)
             return -1;
 
@@ -457,12 +535,13 @@ class Parser {
 			msg += m_curToken.unknownChar;
 			ParserLog(msg);
             int tokPrec = getTokPrecedence(m_curToken);
-			msg = "Precedence";
-			msg += tokPrec;
-			ParserLog("Precedence: ");
-            if (tokPrec < ExprPrec)
-                return LHS;
-
+			msg = "Precedence ";
+			msg += std::to_string(tokPrec);
+			ParserLog(msg);
+            if (tokPrec < ExprPrec) {
+                ParserLog("returning LHS from ParseBinOpRHS");
+				return LHS;
+			}
             char binOp = m_curToken.unknownChar;
 
             getNextToken(); //get expression after operator
@@ -539,6 +618,47 @@ class Parser {
 
         return nullptr;
     }
+	
+	std::unique_ptr<IfExprAST> ParseIfExpr()
+	{
+		ParserLog("ParseIfExpr");
+		getNextToken();
+		//if condition doesnt have brackets
+		auto Cond = ParseExpression();
+		
+		ParserLog("ParseIfExpr Parsed Cond");
+		if (!Cond)
+			return nullptr;
+		
+		if (m_curToken.tok != lexer::tok_then)
+			LogError("Expected then after if statement");
+		
+		getNextToken(); //consume 'then' expr
+		
+		auto Then = ParseExpression();
+				
+		if (!Then)
+			return nullptr;
+		
+		ParserLog("ParseIfExpr Parsed Then");
+		
+		if (m_curToken.tok != lexer::tok_else)
+			LogError("Expected else after then statement");
+		
+		getNextToken();  //consume 'else'
+		
+		
+		auto Else = ParseExpression();
+		
+		if (!Else)
+			return nullptr;
+		
+		ParserLog("ParseIfExpr Parsed Else");
+		
+		return make_unique<IfExprAST>(std::move(Cond), std::move(Then), std::move(Else));
+		
+		
+	}
 
     std::unique_ptr<PrototypeAST> ParseExtern()
     {
@@ -649,6 +769,7 @@ class Parser {
         BinopPrecedence = 
         {
             {'<' , 10},
+			{'>' , 11},
             {'+' , 20},
             {'-' , 30},
             {'*' , 40},

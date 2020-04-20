@@ -1,4 +1,3 @@
-
 #include <cctype>
 #include <cstdlib>
 #include <string>
@@ -41,8 +40,14 @@ class lexer {
 	    tok_identifier = -4,
 	    tok_number = -5,
         
-        //unknown char like ')'
-        tok_unknown = -6,
+        
+		
+		tok_if = -6,
+		tok_then = -7,
+		tok_else = -8,
+		
+		//unknown char like ')'
+        tok_unknown = -9,
     };
     
     struct tokStruct{
@@ -114,6 +119,12 @@ class lexer {
                 return tokStruct(Token::tok_def);
             else if (curString.compare("extern") == 0)
                 return tokStruct(Token::tok_extern);
+			else if (curString.compare("if") == 0)
+                return tokStruct(Token::tok_if);
+			else if (curString.compare("then") == 0)
+                return tokStruct(Token::tok_then);
+			else if (curString.compare("else") == 0)
+                return tokStruct(Token::tok_else);
             return tokStruct(curString);
             
         }
