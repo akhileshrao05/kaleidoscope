@@ -46,8 +46,11 @@ class lexer {
 		tok_then = -7,
 		tok_else = -8,
 		
+		tok_for = -9,
+		tok_in = -10,
+		
 		//unknown char like ')'
-        tok_unknown = -9,
+        tok_unknown = -20,
     };
     
     struct tokStruct{
@@ -125,6 +128,10 @@ class lexer {
                 return tokStruct(Token::tok_then);
 			else if (curString.compare("else") == 0)
                 return tokStruct(Token::tok_else);
+			else if (curString.compare("for") == 0)
+                return tokStruct(Token::tok_for);
+			else if (curString.compare("in") == 0)
+                return tokStruct(Token::tok_in);
             return tokStruct(curString);
             
         }

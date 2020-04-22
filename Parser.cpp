@@ -249,7 +249,7 @@ public:
 		
 		NamedValues.clear();
 		for (auto &Arg : TheFunction->args()) {
-			fprintf(stderr, "Adding aurgument to NamedValues %s",std::string(Arg.getName()).c_str());
+			fprintf(stderr, "Adding argument to NamedValues %s",std::string(Arg.getName()).c_str());
 			NamedValues[Arg.getName()] = &Arg;
 		}
 		
@@ -329,6 +329,20 @@ class IfExprAST : public ExprAST {
 		PN->addIncoming(ElseV, ElseBB);
 		
 		return PN;
+	}
+};
+
+class ForExprAST : public ExprAST {
+	std::string VarName;
+	std::unique_ptr<ExprAST> Start, End, Step, Body;
+	
+	public:
+	ForExprAST (std::string _varName, std::unique_ptr<ExprAST> start, std::unique_ptr<ExprAST> end, std::unique_ptr<ExprAST> step, std::unique_ptr<ExprAST> body):
+	VarName(_varName), Start(std::move(start)), End(std::move(end)), Step(std::move(step)), Body(std::move(body)) {}
+	
+	Value* codegen()
+	{
+		ParserLog("####################### Codegen for ForExprAST");
 	}
 };
 
@@ -476,6 +490,8 @@ class Parser {
 			return ParseIfExpr();
 		else if (m_curToken.tok == lexer::tok_else)
 			return ParseIfExpr();
+		else if (m_curToken.tok == lexer::tok_for)
+			return ParseForExprAST();
         else {
             LogError("Unknown type of expression");
             return nullptr;
@@ -657,6 +673,60 @@ class Parser {
 		
 		return make_unique<IfExprAST>(std::move(Cond), std::move(Then), std::move(Else));
 		
+		
+	}
+	
+	std::unique_ptr<ForExprAST> ParseForExprAST ()
+	{
+		ParserLog(" IN ParseForExprAST");
+		getNextToken();
+		
+		if (m_curToken.tok != lexer::tok_identifier)
+			LogError("Expected identifier after 'for' ");
+		
+		std::string idName = m_curToken.identifierStr;
+		
+		getNextToken();
+		
+		if (m_curToken.unknownChar != '=')
+			LogError("Expected '=' after for");
+		
+		getNextToken();
+		
+		auto Start = ParseExpression();
+		if (!Start)
+			return nullptr;
+		
+		if (m_curToken.unknownChar != ',')
+			LogError("Expected ',' after start value in for statement");
+		getNextToken();
+		
+		auto End = ParseExpression();
+		
+		if (!End)
+			return nullptr;
+		
+		if (m_curToken.unknownChar != ',')
+			LogError("Expected ',' after end value in for statement");
+		getNextToken();
+		
+		
+		auto Step = ParseExpression();
+		
+		if (!Step)
+			return nullptr;
+		
+		if (m_curToken.tok != lexer::tok_in)
+			LogError("Expected 'in' after Step in for statement");
+		
+		getNextToken();
+		
+		auto Body = ParseExpression();
+		
+		if (!Body)
+			return nullptr;
+		
+		return make_unique<ForExprAST>(idName, std::move(Start), std::move(End), std::move(Step), std::move(Body));
 		
 	}
 
