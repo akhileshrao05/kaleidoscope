@@ -333,16 +333,74 @@ class IfExprAST : public ExprAST {
 };
 
 class ForExprAST : public ExprAST {
-	std::string VarName;
+	std::string InductionVarName;
 	std::unique_ptr<ExprAST> Start, End, Step, Body;
 	
 	public:
 	ForExprAST (std::string _varName, std::unique_ptr<ExprAST> start, std::unique_ptr<ExprAST> end, std::unique_ptr<ExprAST> step, std::unique_ptr<ExprAST> body):
-	VarName(_varName), Start(std::move(start)), End(std::move(end)), Step(std::move(step)), Body(std::move(body)) {}
+	InductionVarName(_varName), Start(std::move(start)), End(std::move(end)), Step(std::move(step)), Body(std::move(body)) {}
 	
 	Value* codegen()
 	{
-		ParserLog("####################### Codegen for ForExprAST");
+		//code gen start value
+		Value* StartV = Start->codegen();
+		if (!StartV)
+			return nullptr;
+		
+		//get current function and basic block (it can get modified by Start->codegen() )
+		Function *TheFunction = Builder.GetInsertBlock()->getParent();
+		BasicBlock *PreHeaderBB = Builder.GetInsertBlock();
+		
+		//add new block (loop) 
+		BasicBlock *LoopBB = BasicBlock::Create(TheContext, "loop", TheFunction);
+		
+		//unconditional branch to loop block
+		Builder.CreateBr(LoopBB);
+		
+		Builder.SetInsertPoint(LoopBB);
+		
+		//add phi instruction to update induction variable
+		PHINode *InductionVar = Builder.CreatePHI(Type::getDoubleTy(TheContext), 2, "loop");
+		InductionVar->addIncoming(StartV, PreHeaderBB);
+
+		//Error out if induction variable has been defined earlier
+		if (NamedValues.find(InductionVarName) != NamedValues.end()) {
+			LogError("Redefinition of variable in for loop");
+			return nullptr;
+		}
+		
+		NamedValues[InductionVarName] = InductionVar;
+		
+		//codegen body of loop
+		if (!(Body->codegen()))
+			return nullptr;
+		
+		//codegen increment
+		Value *StepV = Step->codegen();
+		if (!StepV)
+			return nullptr;
+		
+		//increment induction variable by increment
+		Value *NextVar = Builder.CreateFAdd(InductionVar, StepV, "nextvar");
+		
+		//codegen end condition
+		Value *EndCondV = End->codegen();
+		
+		//convert EndV from (0.0 or 1.0) to bool 
+		EndCondV = Builder.CreateFCmpONE(EndCondV, ConstantFP::get(TheContext, APFloat(0.0)), "loopcond");
+		
+		//Create BasicBlock after loop
+		BasicBlock *AfterLoopBB = BasicBlock::Create(TheContext, "afterloop", TheFunction);
+		
+		//conditional branch back to loop or afterloop
+		Builder.CreateCondBr(EndCondV, LoopBB, AfterLoopBB);
+		
+		Builder.SetInsertPoint(AfterLoopBB);
+		
+		InductionVar->addIncoming(NextVar, LoopBB);
+		
+		//for loop always returns 0
+		return Constant::getNullValue(Type::getDoubleTy(TheContext));
 	}
 };
 
