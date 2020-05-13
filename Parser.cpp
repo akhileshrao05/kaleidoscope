@@ -39,7 +39,8 @@ typedef llvm::BasicBlock BasicBlock;*/
 static llvm::LLVMContext TheContext;
 static llvm::IRBuilder<> Builder(TheContext);
 static std::unique_ptr<llvm::Module> TheModule;
-static std::map<string, Value*> NamedValues;
+//static std::map<string, Value*> NamedValues;
+static std::map<string, AllocaInst*> NamedValues;
 
 void LogError(const char *str) {
 	fprintf(stderr, "LogError: %s\n", str);
@@ -53,6 +54,12 @@ class ExprAST {
 public:
     virtual ~ExprAST() {}
 	virtual Value* codegen() {}
+	
+	AllocaInst *CreateEntryblockAlloca(Function *TheFunction, std::string varName)
+	{
+		llvm::IRBuilder<> TmpBuilder(&(TheFunction->getEntryBlock()), TheFunction->getEntryBlock().begin());
+		return TmpBuilder.CreateAlloca(Type::getDoubleTy(TheContext), 0, varName.c_str());
+	}
 };
 
 
@@ -80,7 +87,8 @@ public:
 		ParserLog(msg);
 		if (!V)
 			LogError("Unknown variable name");
-		return V;
+		
+		return Builder.CreateLoad(V, Name.c_str());
 	}
 };
 
@@ -250,7 +258,11 @@ public:
 		NamedValues.clear();
 		for (auto &Arg : TheFunction->args()) {
 			fprintf(stderr, "Adding argument to NamedValues %s",std::string(Arg.getName()).c_str());
-			NamedValues[Arg.getName()] = &Arg;
+			AllocaInst *ArgAlloca = CreateEntryblockAlloca(TheFunction, Arg.getName());
+			
+			Builder.CreateStore(&Arg, ArgAlloca);
+			
+			NamedValues[Arg.getName()] = ArgAlloca;
 		}
 		
 		if (Value* retVal = Body->codegen())
@@ -342,13 +354,19 @@ class ForExprAST : public ExprAST {
 	
 	Value* codegen()
 	{
+		Function *TheFunction = Builder.GetInsertBlock()->getParent();
+		
 		//code gen start value
+		AllocaInst* InductionVar = CreateEntryblockAlloca(TheFunction, InductionVarName);
+		
 		Value* StartV = Start->codegen();
 		if (!StartV)
 			return nullptr;
 		
+		Builder.CreateStore(StartV, InductionVar);
+		
 		//get current function and basic block (it can get modified by Start->codegen() )
-		Function *TheFunction = Builder.GetInsertBlock()->getParent();
+		
 		BasicBlock *PreHeaderBB = Builder.GetInsertBlock();
 		
 		//add new block (loop) 
@@ -360,16 +378,16 @@ class ForExprAST : public ExprAST {
 		Builder.SetInsertPoint(LoopBB);
 		
 		//add phi instruction to update induction variable
-		PHINode *InductionVar = Builder.CreatePHI(Type::getDoubleTy(TheContext), 2, "loop");
-		InductionVar->addIncoming(StartV, PreHeaderBB);
-
+		//PHINode *InductionVar = Builder.CreatePHI(Type::getDoubleTy(TheContext), 2, "loop");
+		//InductionVar->addIncoming(StartV, PreHeaderBB);
+		
 		//Error out if induction variable has been defined earlier
 		if (NamedValues.find(InductionVarName) != NamedValues.end()) {
 			LogError("Redefinition of variable in for loop");
 			return nullptr;
-		}
-		
+		}		
 		NamedValues[InductionVarName] = InductionVar;
+		
 		
 		//codegen body of loop
 		if (!(Body->codegen()))
@@ -381,10 +399,16 @@ class ForExprAST : public ExprAST {
 			return nullptr;
 		
 		//increment induction variable by increment
-		Value *NextVar = Builder.CreateFAdd(InductionVar, StepV, "nextvar");
+		//Value *NextVar = Builder.CreateFAdd(InductionVar, StepV, "nextvar");
+		
+		//increment induction variable by increment
+		Value *Tmp = Builder.CreateLoad(InductionVar);
+		Value *NextVar = Builder.CreateFAdd(Tmp, StepV, "nextvar");
+		Builder.CreateStore(NextVar, InductionVar);
 		
 		//codegen end condition
 		Value *EndCondV = End->codegen();
+		
 		
 		//convert EndV from (0.0 or 1.0) to bool 
 		EndCondV = Builder.CreateFCmpONE(EndCondV, ConstantFP::get(TheContext, APFloat(0.0)), "loopcond");
@@ -397,7 +421,7 @@ class ForExprAST : public ExprAST {
 		
 		Builder.SetInsertPoint(AfterLoopBB);
 		
-		InductionVar->addIncoming(NextVar, LoopBB);
+		//InductionVar->addIncoming(NextVar, LoopBB);
 		
 		//for loop always returns 0
 		return Constant::getNullValue(Type::getDoubleTy(TheContext));
@@ -602,9 +626,7 @@ class Parser {
 		ParserLog("ParseBinOpRHS");
         while(1)
         {
-            
-            //getNextToken(); //get operator
-            //tokStruct nextToken = m_curToken;
+                        
 			std::string msg = "ParseBinOpRHS nextToken.unknownChar";
 			msg += m_curToken.unknownChar;
 			ParserLog(msg);
@@ -618,16 +640,12 @@ class Parser {
 			}
             char binOp = m_curToken.unknownChar;
 
-            getNextToken(); //get expression after operator
-            //nextToken = m_curToken;
+            getNextToken(); //get expression after operator            
 
             auto RHS = ParsePrimaryExpr();
             if (!RHS)
                 return nullptr;
 
-            
-            //nextToken = m_curToken;
-			
             int nextPrec = getTokPrecedence(m_curToken); //get the operator after the next expression
 			msg = "nextToken precedence";
 			msg += nextPrec;
@@ -910,7 +928,7 @@ class Parser {
 // ################################# Test Code ############################################
 int main()
 {
-    char fileName[] = "./kaleidoscope.kl.txt";
+    char fileName[] = "./kaleidoscope_for.kl.txt";
     Parser ps(fileName);
 	TheModule = make_unique<Module>("my cool jit", TheContext);
     ps.MainLoop();

@@ -1,5 +1,5 @@
-def foo(a)
-	for i = 0, i < a, 1 in
-		1
-	
-	
+def foo(a, b)
+	if a < 1 then 
+		b
+	else
+		a + b + 2;
