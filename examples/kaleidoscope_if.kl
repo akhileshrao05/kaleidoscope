@@ -1,5 +1,5 @@
 def foo(a, b)
-	if a < 1 then 
+	if a > 1 then 
 		b
 	else
 		a + b + 2;
