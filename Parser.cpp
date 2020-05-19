@@ -140,7 +140,12 @@ public:
 			}
 			case '<':
 			{
-				Value* result = Builder.CreateFCmpULT(L, R, "subtmp");
+				Value* result = Builder.CreateFCmpULT(L, R, "cmplttmp");
+				return Builder.CreateUIToFP(result, Type::getDoubleTy(TheContext));
+			}
+			case '>':
+			{
+				Value* result = Builder.CreateFCmpUGE(L, R, "cmpgrtmp");
 				return Builder.CreateUIToFP(result, Type::getDoubleTy(TheContext));
 			}
 			default:
@@ -928,7 +933,7 @@ class Parser {
 // ################################# Test Code ############################################
 int main()
 {
-    char fileName[] = "./kaleidoscope_for.kl.txt";
+    char fileName[] = "./kaleidoscope_if.kl.txt";
     Parser ps(fileName);
 	TheModule = make_unique<Module>("my cool jit", TheContext);
     ps.MainLoop();
