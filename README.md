@@ -23,4 +23,4 @@ Implement a parser to convert the tokens to AST
 Codegen to convert the AST to LLVM IR
 
 ### Add support for mutable variables
-Add support for mutable variables using LLVM stack variables (AllocaInst)
+Add support for mutable variables using LLVM stack variables or AllocaInst (This is work in progress)
