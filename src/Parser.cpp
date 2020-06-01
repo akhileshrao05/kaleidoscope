@@ -28,26 +28,23 @@ using namespace std;
 using namespace llvm;
 
 
-
-/*typedef llvm::Value Value;
-typedef llvm::Function Function;
-typedef llvm::Type Type;
-typedef llvm::FunctionType FunctionType;
-typedef llvm::BasicBlock BasicBlock;*/
-
-
 static llvm::LLVMContext TheContext;
 static llvm::IRBuilder<> Builder(TheContext);
 static std::unique_ptr<llvm::Module> TheModule;
-//static std::map<string, Value*> NamedValues;
 static std::map<string, AllocaInst*> NamedValues;
 
+bool printLog = false;
+
 void LogError(const char *str) {
-	fprintf(stderr, "LogError: %s\n", str);
+	if (printLog) {
+		fprintf(stderr, "LogError: %s\n", str);
+	}
 }
 
 void ParserLog(std::string str) {
-	std::cout << "Parser " << str << std::endl;
+	if (printLog) {
+		std::cout << "Parser " << str << std::endl;
+	}
 }
 
 class ExprAST {
@@ -262,7 +259,7 @@ public:
 		
 		NamedValues.clear();
 		for (auto &Arg : TheFunction->args()) {
-			fprintf(stderr, "Adding argument to NamedValues %s",std::string(Arg.getName()).c_str());
+			ParserLog("Adding argument to NamedValues " + std::string(Arg.getName()));
 			AllocaInst *ArgAlloca = CreateEntryblockAlloca(TheFunction, Arg.getName());
 			
 			Builder.CreateStore(&Arg, ArgAlloca);
@@ -453,17 +450,6 @@ class Parser {
         fprintf(stderr, "LogError: %s\n", str);
         return nullptr;
     }
-
-    /*int GetPrecedence(char op)
-    {
-        if (!isascii(op))
-            return -1;
-
-        int tokPrec = BinopPrecedence[op];
-        if (tokPrec <= 0)
-            return -1;
-        return tokPrec;
-    }*/
 
     //sets member 'nextToken' so the next token is visible to the main loop when getNextToken is called by one of the 'ParseIdentifierExpr' type functions
     tokStruct getNextToken() {
@@ -916,7 +902,7 @@ class Parser {
         }
     }
 
-    Parser(char* fileName):lex(lexer(fileName)),m_curToken(tokStruct(lexer::tok_unknown)) {
+    Parser(char* fileName):lex(lexer(fileName, printLog)),m_curToken(tokStruct(lexer::tok_unknown)) {
         BinopPrecedence = 
         {
             {'<' , 10},
@@ -930,13 +916,65 @@ class Parser {
 };
 
 
-// ################################# Test Code ############################################
-int main()
+// ################################# Driver Code ############################################
+int main(int argc, char* argv[])
 {
-    char fileName[] = "./kaleidoscope_if.kl.txt";
+
+    printLog = false;
+	std::string irFile = "ex.ll";
+	char *fileName;
+	bool srcProvided = false;
+    for (int i = 1; i < argc; ++i) {
+		if (std::string(argv[i]) == "--help") {
+            std::cout << "Usage: ./a.exe --log<optional>:turn on logging\n"
+			            << "               --ir-dump<optional> file for ir dump; ex.ll by default\n"
+						<< "               --src<compulsory> source file\n";
+			return 0;
+        }
+        else if (std::string(argv[i]) == "--log") {
+            printLog = true;
+        }
+		else if (std::string(argv[i]) == "--ir-dump") {
+			if (i + 1 < argc) {
+				i++;
+				irFile = std::string(argv[i]);
+			}
+			else {
+				std::cerr << "--ir-dump requires a destination file" << std::endl;
+				return 1;
+			}
+		}
+		else if (std::string(argv[i]) == "--src") {
+			srcProvided = true;
+			if (i + 1 < argc) {
+				i++;
+				fileName = argv[i];
+			}
+			else {
+				std::cerr << "--src requires a destination file" << std::endl;
+				return 1;
+			}
+		}
+    }
+	
+	if (!srcProvided)
+	{
+		std::cerr << "No source file provided" << std::endl;
+		return 1;
+	}
+    
     Parser ps(fileName);
 	TheModule = make_unique<Module>("my cool jit", TheContext);
     ps.MainLoop();
+	
+	std::ofstream irDump(irFile);
+	std::string irString;
+	raw_string_ostream OS(irString);
+	OS << *TheModule;
+	OS.flush();
+	
+	irDump << irString;
+	irDump.close();
 }
 
 

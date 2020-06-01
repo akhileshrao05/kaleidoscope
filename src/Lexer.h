@@ -12,10 +12,11 @@ class lexer {
 
     std::ifstream fileHandle;
 	char LastChar;
+	bool printLog;
 
     public:
 
-    lexer (char fileName[])
+    lexer (char fileName[], bool _printLog) : printLog(_printLog)
     {
         std::cout << "Lexer::lexer(): create file handle" << std::endl << std::flush;
         fileHandle.open(fileName);
@@ -23,7 +24,9 @@ class lexer {
     }
 
 	void LexerLog(std::string str) {
-		std::cout << "Lexer: " << str << std::endl;
+		if (printLog) {
+			std::cout << "Lexer: " << str << std::endl;
+		}
 	}
 
 	/*~lexer()
