@@ -42,9 +42,7 @@ static std::map<string, AllocaInst*> NamedValues;
 bool printLog = false;
 
 void LogError(const char *str) {
-	if (printLog) {
-		fprintf(stderr, "LogError: %s\n", str);
-	}
+	fprintf(stderr, "LogError: %s\n", str);
 }
 
 void ParserLog(std::string str) {
@@ -57,6 +55,7 @@ class ExprAST {
 public:
     virtual ~ExprAST() {}
 	virtual Value* codegen() = 0;
+	
 	
 	AllocaInst *CreateEntryblockAlloca(Function *TheFunction, std::string varName)
 	{
@@ -82,14 +81,16 @@ class VariableExprAST : public ExprAST {
     std::string Name;
 public:
     VariableExprAST (std::string &_Name) : Name (_Name) {}
+	std::string getName() {return Name;}
 	Value* codegen()
 	{
 		Value* V = NamedValues[Name];
 		std::string msg = "VariableExprAST::codegen() ";
 		msg += Name;
 		ParserLog(msg);
-		if (!V)
-			LogError("Unknown variable name");
+		if (!V) {
+			ParserLog("Unknown variable name " + Name);
+		}
 		
 		return Builder.CreateLoad(V, Name.c_str());
 	}
@@ -122,6 +123,28 @@ public:
 	
 	Value* codegen()
 	{
+		if (op == '=')
+		{
+			
+			VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(LHS.get());
+				if (!LHSE) {
+					LogError("destination of '=' must be a variable");
+					return nullptr;
+				}
+				
+				Value *R = RHS->codegen();
+				if (!R)
+					return nullptr;
+				
+				Value *L = NamedValues[LHSE->getName()];
+				if (!L) {
+					LogError("Unknown variable name");
+				}
+				
+				Builder.CreateStore(R, L);
+				
+				return R; //Returning a value allows for chained assignments like “X = (Y = Z)”
+		}
 		Value* L = LHS->codegen();
 		Value* R = RHS->codegen();
 		if (!L || !R)
@@ -129,6 +152,7 @@ public:
 		
 		switch (op)
 		{
+			
 			case '+':
 			{
 				return Builder.CreateFAdd(L, R, "addtmp");
@@ -150,6 +174,10 @@ public:
 			{
 				Value* result = Builder.CreateFCmpUGE(L, R, "cmpgrtmp");
 				return Builder.CreateUIToFP(result, Type::getDoubleTy(TheContext));
+			}
+			case ':':
+			{
+				return R; //return this just so as to not return nullptr
 			}
 			default:
 			{
@@ -436,6 +464,49 @@ class ForExprAST : public ExprAST {
 	}
 };
 
+class VarExprAST : public ExprAST {
+	private:
+	std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
+	std::unique_ptr<ExprAST> Body;
+	
+	public:
+	VarExprAST (std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> _varNames, std::unique_ptr<ExprAST> _body) : Body(std::move(_body)), VarNames(std::move(_varNames)) {}
+	Value* codegen() 
+	{
+		Function *TheFunction = Builder.GetInsertBlock()->getParent();
+		for (int i = 0; i < VarNames.size(); i++) {
+			std::string name = VarNames[i].first;
+			
+			//Error out if variable has been defined earlier
+			if (NamedValues.find(name) != NamedValues.end()) {
+				LogError("Redefinition of variable");
+				return nullptr;
+			}
+			ExprAST* init = VarNames[i].second.get();
+
+			Value* initVal;
+			if (init) {
+				initVal = init->codegen();
+				if (!initVal)
+					return nullptr;	
+			}
+			else {
+				initVal = ConstantFP::get(TheContext, APFloat(0.0));
+			}			
+			
+			AllocaInst* VarAlloca = CreateEntryblockAlloca(TheFunction, name);
+			Builder.CreateStore(initVal, VarAlloca);
+			NamedValues[name] = VarAlloca;
+		}
+		
+		auto *BodyVal = Body->codegen();
+		if (!Body)
+			return nullptr;
+		
+		return BodyVal;
+	}
+};
+
 typedef lexer::tokStruct tokStruct;
 
 class Parser {
@@ -550,7 +621,7 @@ class Parser {
 
         }
         //getNextToken();
-		ParserLog("ParseIdentifierExpr: returning CAllExprAST");
+		ParserLog("ParseIdentifierExpr: returning CallExprAST");
         return make_unique<CallExprAST>(curTok.identifierStr, std::move(Args));
     }
 
@@ -571,6 +642,8 @@ class Parser {
 			return ParseIfExpr();
 		else if (m_curToken.tok == lexer::tok_for)
 			return ParseForExprAST();
+		else if (m_curToken.tok == lexer::tok_var)
+			return ParseVarExprAST();
         else {
             LogError("Unknown type of expression");
             return nullptr;
@@ -579,10 +652,12 @@ class Parser {
     
     bool isBinaryOperator (tokStruct curToken)
     {
+		if (curToken.tok != lexer::tok_unknown)
+			return false;
 		std::string msg = "curToken.unknownChar ";
 		msg += curToken.unknownChar;
 		ParserLog(msg);
-		if ((curToken.unknownChar == '&') || (curToken.unknownChar == '|') || (curToken.unknownChar == '>') || (curToken.unknownChar == '<') || (curToken.unknownChar == '+') || (curToken.unknownChar == '-') || (curToken.unknownChar == '*') || (curToken.unknownChar == '/'))
+		if ((curToken.unknownChar == '&') || (curToken.unknownChar == '|') || (curToken.unknownChar == '>') || (curToken.unknownChar == '<') || (curToken.unknownChar == '+') || (curToken.unknownChar == '-') || (curToken.unknownChar == '*') || (curToken.unknownChar == '/') || (curToken.unknownChar == '=') || (curToken.unknownChar == ':'))
             return true;
         return false;
     }
@@ -719,8 +794,10 @@ class Parser {
 		if (!Cond)
 			return nullptr;
 		
-		if (m_curToken.tok != lexer::tok_then)
+		if (m_curToken.tok != lexer::tok_then) {
 			LogError("Expected then after if statement");
+			return nullptr;
+		}
 		
 		getNextToken(); //consume 'then' expr
 		
@@ -801,6 +878,54 @@ class Parser {
 		
 		return make_unique<ForExprAST>(idName, std::move(Start), std::move(End), std::move(Step), std::move(Body));
 		
+	}
+	
+	std::unique_ptr<ExprAST> ParseVarExprAST()
+	{
+		ParserLog("In ParseVarExprAST");
+		std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
+		getNextToken();
+		
+		if (m_curToken.tok != lexer::tok_identifier) {
+			LogError("Expected identifier in var expression");
+			return nullptr;
+		}
+		
+		while(1) {
+			std::string Name = m_curToken.identifierStr;
+			getNextToken();
+			
+			std::unique_ptr<ExprAST> Init;
+			if (m_curToken.unknownChar == '=') {
+				getNextToken();
+				Init = ParseExpression();
+				if (!Init)
+					return nullptr;
+			}
+			VarNames.push_back(std::make_pair(Name, std::move(Init)));
+			
+			if (m_curToken.unknownChar != ',')
+				break;
+			
+			getNextToken();
+			if (m_curToken.tok != lexer::tok_identifier) {
+				LogError("Expected identifier in var expression");
+				return nullptr;
+			}
+		}
+		if (m_curToken.tok != lexer::tok_in) {
+			ParserLog("Error: Expected 'in' in var expression");
+			return nullptr;
+		}
+			
+		getNextToken();
+		
+		auto Body = ParseExpression();
+		
+		if (!Body) 
+			return nullptr;
+		
+		return make_unique<VarExprAST>(std::move(VarNames), std::move(Body));
 	}
 
     std::unique_ptr<PrototypeAST> ParseExtern()
@@ -887,7 +1012,6 @@ class Parser {
 
             else if (m_curToken.unknownChar == ';') {
                 getNextToken();
-               
             }
             else if (m_curToken.tok == lexer::tok_def) {
                 HandleDefinition();
@@ -911,6 +1035,8 @@ class Parser {
     Parser(char* fileName):lex(lexer(fileName, printLog)),m_curToken(tokStruct(lexer::tok_unknown)) {
         BinopPrecedence = 
         {
+			{':' ,  1},
+			{'=' ,  2},
             {'<' , 10},
 			{'>' , 11},
             {'+' , 20},

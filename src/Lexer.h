@@ -52,6 +52,8 @@ class lexer {
 		tok_for = -9,
 		tok_in = -10,
 		
+		tok_var = -11,
+		
 		//unknown char like ')'
         tok_unknown = -20,
     };
@@ -135,6 +137,8 @@ class lexer {
                 return tokStruct(Token::tok_for);
 			else if (curString.compare("in") == 0)
                 return tokStruct(Token::tok_in);
+			else if (curString.compare("var") == 0)
+                return tokStruct(Token::tok_var);
             return tokStruct(curString);
             
         }
