@@ -10,14 +10,16 @@ I am using this as a way to teach myself LLVM.</br>
 Kaleidoscope is a simple language with only one datatype which is double.
 It supports binary operations : +,-,*,/,<,>
 It supports functions, control flow: for loops and if/then/else statements.
-You can write programs like:
+You can write programs like:</br>
 
+<code>
 //Compute the x'th fibonacci number.
-def fib(x)
-  if x < 3 then
-    1
-  else
-    fib(x-1)+fib(x-2)
+def fib(x)<br>
+  if x < 3 then<br>
+    1<br>
+  else<br>
+    fib(x-1)+fib(x-2)<br>
+</code>
 
 
 ## The different stages
