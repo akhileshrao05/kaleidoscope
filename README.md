@@ -10,6 +10,17 @@ I am using this as a way to teach myself LLVM.</br>
 Kaleidoscope is a simple language with only one datatype which is double.
 It supports binary operations : +,-,*,/,<,>
 It supports functions, control flow: for loops and if/then/else statements.
+You can write programs like:</br>
+
+<code>
+//Compute the x'th fibonacci number.
+def fib(x)<br>
+  if x < 3 then<br>
+    1<br>
+  else<br>
+    fib(x-1)+fib(x-2)<br>
+</code>
+
 
 ## The different stages
 
@@ -23,4 +34,8 @@ Implement a parser to convert the tokens to AST
 Codegen to convert the AST to LLVM IR
 
 ### Add support for mutable variables
-Add support for mutable variables using LLVM stack variables or AllocaInst (This is work in progress)
+Add support for defining new variables and modifying existing variables using LLVM stack variables or AllocaInst 
+
+### Add support for compiling to object files
+Add support to convert the generated LLVM IR to an onject file : "output.o" which can be linked with other file by using:
+clang++ main.cpp output.o -o main
