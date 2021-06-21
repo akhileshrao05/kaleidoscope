@@ -1,20 +1,3 @@
-#include "llvm/ADT/APFloat.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/Type.h"
-#include "llvm/IR/Verifier.h"
-#include "llvm/Support/TargetRegistry.h"
-#include "llvm/Support/TargetSelect.h"
-#include "llvm/Target/TargetMachine.h"
-#include "llvm/Target/TargetOptions.h"
-
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -27,509 +10,23 @@
 #include <utility>
 #include <iostream>
 
-#include "Lexer.h"
+#ifndef AST_DEFINED
+#include "AST.h"
+#define AST_DEFINED
+#endif
+
+#include "Parser.h"
+
+
 
 
 using namespace std;
-using namespace llvm;
 
 
-static llvm::LLVMContext TheContext;
-static llvm::IRBuilder<> Builder(TheContext);
-static std::unique_ptr<llvm::Module> TheModule;
-static std::map<string, AllocaInst*> NamedValues;
-
-bool printLog = false;
-
-void LogError(const char *str) {
-	fprintf(stderr, "LogError: %s\n", str);
-}
-
-void ParserLog(std::string str) {
-	if (printLog) {
-		std::cout << "Parser " << str << std::endl;
-	}
-}
-
-class ExprAST {
-public:
-    virtual ~ExprAST() {}
-	virtual Value* codegen() = 0;
-	
-	
-	AllocaInst *CreateEntryblockAlloca(Function *TheFunction, std::string varName)
-	{
-		llvm::IRBuilder<> TmpBuilder(&(TheFunction->getEntryBlock()), TheFunction->getEntryBlock().begin());
-		return TmpBuilder.CreateAlloca(Type::getDoubleTy(TheContext), 0, varName.c_str());
-	}
-};
-
-
-class NumberExprAST : public ExprAST {
-    double Val;
-public:
-    NumberExprAST (double _val) : Val(_val) {}
-    double getVal() {return Val;}
-	Value* codegen()
-	{
-		return llvm::ConstantFP::get(TheContext, APFloat(Val));
-	}
-};
-
-
-class VariableExprAST : public ExprAST {
-    std::string Name;
-public:
-    VariableExprAST (std::string &_Name) : Name (_Name) {}
-	std::string getName() {return Name;}
-	Value* codegen()
-	{
-		Value* V = NamedValues[Name];
-		std::string msg = "VariableExprAST::codegen() ";
-		msg += Name;
-		ParserLog(msg);
-		if (!V) {
-			ParserLog("Unknown variable name " + Name);
-		}
-		
-		return Builder.CreateLoad(V, Name.c_str());
-	}
-};
-
-class BinaryExprAST : public ExprAST {
-    char op;
-    std::unique_ptr<ExprAST> LHS, RHS;
-
-public:
-    BinaryExprAST (char _op, std::unique_ptr<ExprAST> _lhs, std::unique_ptr<ExprAST> _rhs) : op(_op), LHS(std::move(_lhs)), RHS(std::move(_rhs)) {}
-    BinaryExprAST (BinaryExprAST&& other) {
-        this->op = other.op;
-        this->LHS = std::move(other.LHS);
-        this->RHS = std::move(other.RHS);
-
-        other.LHS = nullptr;
-        other.RHS = nullptr;
-    }
-    BinaryExprAST& operator=(BinaryExprAST&& other) {
-        this->op = other.op;
-        this->LHS = std::move(other.LHS);
-        this->RHS = std::move(other.RHS);
-
-        other.LHS = nullptr;
-        other.RHS = nullptr;
-
-        return *this;
-    }
-	
-	Value* codegen()
-	{
-		if (op == '=')
-		{
-			
-			VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(LHS.get());
-				if (!LHSE) {
-					LogError("destination of '=' must be a variable");
-					return nullptr;
-				}
-				
-				Value *R = RHS->codegen();
-				if (!R)
-					return nullptr;
-				
-				Value *L = NamedValues[LHSE->getName()];
-				if (!L) {
-					LogError("Unknown variable name");
-				}
-				
-				Builder.CreateStore(R, L);
-				
-				return R; //Returning a value allows for chained assignments like “X = (Y = Z)”
-		}
-		Value* L = LHS->codegen();
-		Value* R = RHS->codegen();
-		if (!L || !R)
-			return nullptr;
-		
-		switch (op)
-		{
-			
-			case '+':
-			{
-				return Builder.CreateFAdd(L, R, "addtmp");
-			}
-			case '-':
-			{
-				return Builder.CreateFSub(L, R, "subtmp");
-			}
-			case '*':
-			{
-				return Builder.CreateFMul(L, R, "multmp");
-			}
-			case '<':
-			{
-				Value* result = Builder.CreateFCmpULT(L, R, "cmplttmp");
-				return Builder.CreateUIToFP(result, Type::getDoubleTy(TheContext));
-			}
-			case '>':
-			{
-				Value* result = Builder.CreateFCmpUGE(L, R, "cmpgrtmp");
-				return Builder.CreateUIToFP(result, Type::getDoubleTy(TheContext));
-			}
-			case ':':
-			{
-				return R; //return this just so as to not return nullptr
-			}
-			default:
-			{
-				LogError("Invalid binary operator");
-				return nullptr;
-			}
-		}
-	}
-};
-
-class CallExprAST : public ExprAST {
-    std::string Callee;
-    std::vector<std::unique_ptr<ExprAST>> Args;
-
-public:
-    CallExprAST (std::string &_callee, std::vector<std::unique_ptr<ExprAST>> _args) : Callee(_callee), Args(std::move(_args)) {}
-    CallExprAST (CallExprAST&& other) {
-        this->Callee = other.Callee;
-        this->Args = std::move(other.Args);
-    }
-
-    CallExprAST& operator=(CallExprAST&& other)
-    {
-        this->Callee = other.Callee;
-        this->Args = std::move(other.Args);
-        return *this;
-    }
-	
-	Value* codegen() 
-	{
-	  // Look up the name in the global module table.
-	  Function *CalleeF = TheModule->getFunction(Callee);
-	  if (!CalleeF) {
-		LogError("Unknown function referenced");
-		return nullptr;
-	  }
-
-	  // If argument mismatch error.
-	  if (CalleeF->arg_size() != Args.size()) {
-		LogError("Incorrect # arguments passed");
-		return nullptr;
-	  }
-
-	  std::vector<Value *> ArgsV;
-	  for (unsigned i = 0, e = Args.size(); i != e; ++i) {
-		ArgsV.push_back(Args[i]->codegen());
-		if (!ArgsV.back())
-		  return nullptr;
-	  }
-
-	  return Builder.CreateCall(CalleeF, ArgsV, "calltmp");
-	}
-};
-
-class PrototypeAST : public ExprAST {
-    std::string Name;
-    std::vector<std::string> Args;
-
-public:
-    PrototypeAST (std::string _name, std::vector<std::string> _args) : Name(_name), Args(std::move (_args)) {}
-    /*PrototypeAST (PrototypeAST&& other){
-        this->Name = other.Name;
-        this->Args = other.Args;
-    }*/
-
-    const std::string &getName() const { return Name; }
-	
-	Function* codegen()
-	{
-		
-		std::vector<Type*> Doubles(Args.size(), Type::getDoubleTy(TheContext));
-		FunctionType* FT = FunctionType::get(Type::getDoubleTy(TheContext), Doubles, false);
-		
-		Function *F = Function::Create(FT, Function::ExternalLinkage, Name, TheModule.get());
-		
-		//Set name of each argument, not necessary but make IR more readable
-		int id = 0;
-		for (auto &Arg : F->args())
-			Arg.setName(Args[id++]);
-		
-		return F;
-	}
-};
-
-class FunctionAST : public ExprAST {
-    std::unique_ptr<PrototypeAST> Proto;
-    std::unique_ptr<ExprAST> Body;
-
-public:
-    FunctionAST (FunctionAST&& other) {
-        this->Proto = std::move(other.Proto);
-        this->Body = std::move(other.Body);
-    }
-	
-	FunctionAST (std::unique_ptr<PrototypeAST> _proto, std::unique_ptr<ExprAST> _body) : Proto(std::move(_proto)), Body(std::move(_body)) {}
-	
-	Function* codegen()
-	{
-		ParserLog("Function.codegen()");
-		Function* TheFunction = TheModule->getFunction(Proto->getName());
-		
-		if (!TheFunction)
-			TheFunction = Proto->codegen();
-		
-		if (!TheFunction)
-			return nullptr;
-		
-		if (!TheFunction->empty())
-			LogError("Function cannot be redifined");
-		
-		BasicBlock *BB = BasicBlock::Create(TheContext, "entry", TheFunction);
-		Builder.SetInsertPoint(BB);
-		
-		NamedValues.clear();
-		for (auto &Arg : TheFunction->args()) {
-			ParserLog("Adding argument to NamedValues " + std::string(Arg.getName()));
-			AllocaInst *ArgAlloca = CreateEntryblockAlloca(TheFunction, Arg.getName());
-			
-			Builder.CreateStore(&Arg, ArgAlloca);
-			
-			NamedValues[Arg.getName()] = ArgAlloca;
-		}
-		
-		if (Value* retVal = Body->codegen())
-		{
-			Builder.CreateRet(retVal);
-			
-			verifyFunction(*TheFunction);
-			
-			return TheFunction;
-		}
-		
-		TheFunction->eraseFromParent();
-		return nullptr;
-	}
-};
-
-class IfExprAST : public ExprAST {
-	std::unique_ptr<ExprAST> Cond, Then, Else;
-	
-	public:
-	IfExprAST(std::unique_ptr<ExprAST> _Cond, std::unique_ptr<ExprAST> _Then, std::unique_ptr<ExprAST> _Else)
-	 : Cond(std::move(_Cond)),Then(std::move(_Then)),Else(std::move(_Else)) {}
-	
-	Value* codegen()
-	{
-		Value *CondV = Cond->codegen(); 
-		if (!CondV)
-			return nullptr;
-		
-		CondV = Builder.CreateFCmpONE(CondV, ConstantFP::get(TheContext, APFloat(0.0)), "ifcond");
-		
-		Function *TheFunction = Builder.GetInsertBlock()->getParent();
-		
-		BasicBlock *ThenBB = BasicBlock::Create(TheContext, "then", TheFunction);
-		BasicBlock *ElseBB = BasicBlock::Create(TheContext, "else");
-		BasicBlock *MergeBB = BasicBlock::Create(TheContext, "ifcont");
-		
-		Builder.CreateCondBr(CondV, ThenBB, ElseBB);
-		
-		//set insert point to ThenBB
-		Builder.SetInsertPoint(ThenBB);
-		
-		//codegen ThenBB
-		Value *ThenV = Then->codegen();
-		if (!ThenV)
-			return nullptr;
-		
-		//add branch to MergeBB
-		Builder.CreateBr(MergeBB);
-		
-		ThenBB = Builder.GetInsertBlock();
-		
-		TheFunction->getBasicBlockList().push_back(ElseBB);
-		//set insert point to ElseBB
-		Builder.SetInsertPoint(ElseBB);
-		
-		//codegen ElseBB
-		Value *ElseV = Else->codegen();
-		
-		if (!ElseV)
-			return nullptr;
-		
-		//add branch to MergeBB
-		Builder.CreateBr(MergeBB);
-		
-		ElseBB = Builder.GetInsertBlock();
-		TheFunction->getBasicBlockList().push_back(MergeBB);
-		
-		//set insert point to MergeBB
-		Builder.SetInsertPoint(MergeBB);
-		
-		//add phi to merge values from ThenBB and ElseBB
-		PHINode *PN = Builder.CreatePHI(Type::getDoubleTy(TheContext), 2, "iftmp");
-		
-		PN->addIncoming(ThenV, ThenBB);
-		PN->addIncoming(ElseV, ElseBB);
-		
-		return PN;
-	}
-};
-
-class ForExprAST : public ExprAST {
-	std::string InductionVarName;
-	std::unique_ptr<ExprAST> Start, End, Step, Body;
-	
-	public:
-	ForExprAST (std::string _varName, std::unique_ptr<ExprAST> start, std::unique_ptr<ExprAST> end, std::unique_ptr<ExprAST> step, std::unique_ptr<ExprAST> body):
-	InductionVarName(_varName), Start(std::move(start)), End(std::move(end)), Step(std::move(step)), Body(std::move(body)) {}
-	
-	Value* codegen()
-	{
-		Function *TheFunction = Builder.GetInsertBlock()->getParent();
-		
-		//code gen start value
-		AllocaInst* InductionVar = CreateEntryblockAlloca(TheFunction, InductionVarName);
-		
-		Value* StartV = Start->codegen();
-		if (!StartV)
-			return nullptr;
-		
-		Builder.CreateStore(StartV, InductionVar);
-		
-		//get current function and basic block (it can get modified by Start->codegen() )
-		
-		BasicBlock *PreHeaderBB = Builder.GetInsertBlock();
-		
-		//add new block (loop) 
-		BasicBlock *LoopBB = BasicBlock::Create(TheContext, "loop", TheFunction);
-		
-		//unconditional branch to loop block
-		Builder.CreateBr(LoopBB);
-		
-		Builder.SetInsertPoint(LoopBB);
-		
-		//add phi instruction to update induction variable
-		//PHINode *InductionVar = Builder.CreatePHI(Type::getDoubleTy(TheContext), 2, "loop");
-		//InductionVar->addIncoming(StartV, PreHeaderBB);
-		
-		//Error out if induction variable has been defined earlier
-		if (NamedValues.find(InductionVarName) != NamedValues.end()) {
-			LogError("Redefinition of variable in for loop");
-			return nullptr;
-		}		
-		NamedValues[InductionVarName] = InductionVar;
-		
-		
-		//codegen body of loop
-		if (!(Body->codegen()))
-			return nullptr;
-		
-		//codegen increment
-		Value *StepV = Step->codegen();
-		if (!StepV)
-			return nullptr;
-		
-		//increment induction variable by increment
-		//Value *NextVar = Builder.CreateFAdd(InductionVar, StepV, "nextvar");
-		
-		//increment induction variable by increment
-		Value *Tmp = Builder.CreateLoad(InductionVar);
-		Value *NextVar = Builder.CreateFAdd(Tmp, StepV, "nextvar");
-		Builder.CreateStore(NextVar, InductionVar);
-		
-		//codegen end condition
-		Value *EndCondV = End->codegen();
-		
-		
-		//convert EndV from (0.0 or 1.0) to bool 
-		EndCondV = Builder.CreateFCmpONE(EndCondV, ConstantFP::get(TheContext, APFloat(0.0)), "loopcond");
-		
-		//Create BasicBlock after loop
-		BasicBlock *AfterLoopBB = BasicBlock::Create(TheContext, "afterloop", TheFunction);
-		
-		//conditional branch back to loop or afterloop
-		Builder.CreateCondBr(EndCondV, LoopBB, AfterLoopBB);
-		
-		Builder.SetInsertPoint(AfterLoopBB);
-		
-		//InductionVar->addIncoming(NextVar, LoopBB);
-		
-		//for loop always returns 0
-		return Constant::getNullValue(Type::getDoubleTy(TheContext));
-	}
-};
-
-class VarExprAST : public ExprAST {
-	private:
-	std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
-	std::unique_ptr<ExprAST> Body;
-	
-	public:
-	VarExprAST (std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> _varNames, std::unique_ptr<ExprAST> _body) : Body(std::move(_body)), VarNames(std::move(_varNames)) {}
-	Value* codegen() 
-	{
-		Function *TheFunction = Builder.GetInsertBlock()->getParent();
-		for (int i = 0; i < VarNames.size(); i++) {
-			std::string name = VarNames[i].first;
-			
-			//Error out if variable has been defined earlier
-			if (NamedValues.find(name) != NamedValues.end()) {
-				LogError("Redefinition of variable");
-				return nullptr;
-			}
-			ExprAST* init = VarNames[i].second.get();
-
-			Value* initVal;
-			if (init) {
-				initVal = init->codegen();
-				if (!initVal)
-					return nullptr;	
-			}
-			else {
-				initVal = ConstantFP::get(TheContext, APFloat(0.0));
-			}			
-			
-			AllocaInst* VarAlloca = CreateEntryblockAlloca(TheFunction, name);
-			Builder.CreateStore(initVal, VarAlloca);
-			NamedValues[name] = VarAlloca;
-		}
-		
-		auto *BodyVal = Body->codegen();
-		if (!Body)
-			return nullptr;
-		
-		return BodyVal;
-	}
-};
-
-typedef lexer::tokStruct tokStruct;
-
-class Parser {
-
-    private:
-	
-	template <typename T, typename ...Args> std::unique_ptr<T> make_unique(Args&& ...args)
-	{
-		return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
-	}
-    
-    lexer lex;
-    tokStruct m_curToken;
-
-    std::map<char, int> BinopPrecedence;
-    
-    std::unique_ptr<ExprAST> LogError(const char *str) {
-        fprintf(stderr, "LogError: %s\n", str);
-        return nullptr;
-    }
+namespace myCompiler {
 
     //sets member 'nextToken' so the next token is visible to the main loop when getNextToken is called by one of the 'ParseIdentifierExpr' type functions
-    tokStruct getNextToken() {
+    tokStruct Parser::getNextToken() {
 		ParserLog("Parser getNextToken: ");
         m_curToken = lex.getTok();
 		std::string msg = "curToken.unknownChar ";
@@ -539,16 +36,16 @@ class Parser {
         return m_curToken;
     }
 
-    std::unique_ptr<ExprAST> ParseNumberExpr()
+    std::shared_ptr<ExprAST> Parser::ParseNumberExpr()
     {
 		ParserLog("ParseNumberExpr numVal:");
-        auto newASTNode = make_unique<NumberExprAST>(m_curToken.numVal);
+        auto newASTNode = make_shared<NumberExprAST>(m_curToken.numVal);
 		getNextToken();
-        return std::move(newASTNode);
+        return newASTNode;
     }
 
     //called when current token is '('
-    std::unique_ptr<ExprAST> ParseParenExpr() {
+    std::shared_ptr<ExprAST> Parser::ParseParenExpr() {
         //tokStruct curTok = getNextToken();
         getNextToken();
         auto parenExpr = ParseExpression();
@@ -561,14 +58,14 @@ class Parser {
         getNextToken();
         if (m_curToken.unknownChar != ')')
         {
-            LogError("expected ')'");
+            ParserLog("expected ')'");
         }
 
         return parenExpr;
 
     }
 
-    std::unique_ptr<ExprAST> ParseIdentifierExpr()
+    std::shared_ptr<ExprAST> Parser::ParseIdentifierExpr()
     {
 		ParserLog("Parse identifierExpr");
         tokStruct curTok = m_curToken;
@@ -577,13 +74,13 @@ class Parser {
 
         if (nextTok.unknownChar != '(') {
 			ParserLog("Parse identifierExpr '(' not found return VariableExprAST ");
-            return make_unique<VariableExprAST> (curTok.identifierStr);
+            return make_shared<VariableExprAST> (curTok.identifierStr);
 		}
 		ParserLog("Parse identifierExpr found '(' parsing callExpr ");
         
 		getNextToken();
         nextTok = m_curToken;
-        std::vector<std::unique_ptr<ExprAST>> Args;
+        std::vector<std::shared_ptr<ExprAST>> Args;
         
         if (nextTok.unknownChar != ')')
         {
@@ -592,7 +89,7 @@ class Parser {
             {
                 if (auto Arg = ParseExpression()) {
 					std::cout << "ParseIdentifierExpr Parsed one argument " << std::endl;
-                    Args.push_back(std::move(Arg));
+                    Args.push_back(Arg);
 				}
                 else
                     return nullptr;
@@ -611,7 +108,7 @@ class Parser {
 				}*/
 				
                 if ((m_curToken.tok == lexer::Token::tok_unknown) && ((m_curToken.unknownChar != ')') && (m_curToken.unknownChar != ','))) {
-                    LogError("Expected ')' or ',' in argument list");
+                    ParserLog("Expected ')' or ',' in argument list");
                     return nullptr;
                 }
 
@@ -622,10 +119,10 @@ class Parser {
         }
         //getNextToken();
 		ParserLog("ParseIdentifierExpr: returning CallExprAST");
-        return make_unique<CallExprAST>(curTok.identifierStr, std::move(Args));
+        return make_shared<CallExprAST>(curTok.identifierStr, Args);
     }
 
-    std::unique_ptr<ExprAST> ParsePrimaryExpr()
+    std::shared_ptr<ExprAST> Parser::ParsePrimaryExpr()
     {
 		ParserLog("ParsePrimaryExpr");
         if (m_curToken.tok == lexer::tok_identifier)
@@ -645,12 +142,12 @@ class Parser {
 		else if (m_curToken.tok == lexer::tok_var)
 			return ParseVarExprAST();
         else {
-            LogError("Unknown type of expression");
+            ParserLog("Unknown type of expression");
             return nullptr;
         }
     }
     
-    bool isBinaryOperator (tokStruct curToken)
+    bool Parser::isBinaryOperator(tokStruct curToken)
     {
 		if (curToken.tok != lexer::tok_unknown)
 			return false;
@@ -662,7 +159,7 @@ class Parser {
         return false;
     }
 
-    int getTokPrecedence(tokStruct curToken)
+    int Parser::getTokPrecedence(tokStruct curToken)
     {
         //check if it is a binary operator
 		
@@ -682,7 +179,7 @@ class Parser {
         return TokPrec;
     }
 
-    std::unique_ptr<ExprAST> ParseExpression()
+    std::shared_ptr<ExprAST> Parser::ParseExpression()
     {
 		ParserLog("ParseExpression");
 		//getNextToken();
@@ -690,10 +187,10 @@ class Parser {
         if (!LHS)
             return nullptr;
 
-        return ParseBinOpRHS(0, std::move(LHS));
+        return ParseBinOpRHS(0, LHS);
     }
 
-    std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, std::unique_ptr<ExprAST> LHS)
+    std::shared_ptr<ExprAST> Parser::ParseBinOpRHS(int ExprPrec, std::shared_ptr<ExprAST> LHS)
     {
 		ParserLog("ParseBinOpRHS");
         while(1)
@@ -724,29 +221,29 @@ class Parser {
 			ParserLog(msg);
             if (nextPrec >= tokPrec)
             {
-                RHS = ParseBinOpRHS(tokPrec+1, std::move(RHS));
+                RHS = ParseBinOpRHS(tokPrec+1, RHS);
 
                 if (!RHS)
                     return nullptr;
             }
 			
-            LHS = make_unique<BinaryExprAST>(binOp, std::move(LHS), std::move(RHS));
+            LHS = make_shared<BinaryExprAST>(binOp, LHS, RHS);
 
         }
     }
 
-    std::unique_ptr<PrototypeAST> ParsePrototype()
+    std::shared_ptr<PrototypeAST> Parser::ParsePrototype()
     {
 		std::cout << "ParsePrototype " << std::endl << std::flush;
         if (m_curToken.tok != lexer::tok_identifier) {
-            LogError("Expected function name in prototype");
+            ParserLog("Expected function name in prototype");
             return nullptr;
         }
 
         std::string fnName = m_curToken.identifierStr;
         getNextToken();
         if (m_curToken.unknownChar != '(') {
-            LogError("Expected '(' in prototype");
+            ParserLog("Expected '(' in prototype");
 			std::cout << m_curToken.unknownChar << std::endl;
             return nullptr;
         }
@@ -762,14 +259,14 @@ class Parser {
         }
 
         if (m_curToken.unknownChar != ')')
-            LogError("Expected ')' in prototype");
+            ParserLog("Expected ')' in prototype");
 		
 		getNextToken();
 
-        return make_unique<PrototypeAST>(fnName, ArgNames);
+        return make_shared<PrototypeAST>(fnName, ArgNames);
     }
 
-    std::unique_ptr<FunctionAST> ParseDefinition()
+    std::shared_ptr<FunctionAST> Parser::ParseDefinition()
     {
         ParserLog("ParseDefinition");
         getNextToken(); //consume 'def'
@@ -778,12 +275,12 @@ class Parser {
             return nullptr;
 		
         if (auto E = ParseExpression())
-            return make_unique<FunctionAST>(std::move(proto), std::move(E));
+            return make_shared<FunctionAST>(proto, E);
 
         return nullptr;
     }
 	
-	std::unique_ptr<IfExprAST> ParseIfExpr()
+	std::shared_ptr<IfExprAST> Parser::ParseIfExpr()
 	{
 		ParserLog("ParseIfExpr");
 		getNextToken();
@@ -795,7 +292,7 @@ class Parser {
 			return nullptr;
 		
 		if (m_curToken.tok != lexer::tok_then) {
-			LogError("Expected then after if statement");
+			ParserLog("Expected then after if statement");
 			return nullptr;
 		}
 		
@@ -809,7 +306,7 @@ class Parser {
 		ParserLog("ParseIfExpr Parsed Then");
 		
 		if (m_curToken.tok != lexer::tok_else)
-			LogError("Expected else after then statement");
+			ParserLog("Expected else after then statement");
 		
 		getNextToken();  //consume 'else'
 		
@@ -821,25 +318,25 @@ class Parser {
 		
 		ParserLog("ParseIfExpr Parsed Else");
 		
-		return make_unique<IfExprAST>(std::move(Cond), std::move(Then), std::move(Else));
+		return make_shared<IfExprAST>(Cond, Then, Else);
 		
 		
 	}
 	
-	std::unique_ptr<ForExprAST> ParseForExprAST ()
+	std::shared_ptr<ForExprAST> Parser::ParseForExprAST ()
 	{
-		ParserLog(" IN ParseForExprAST");
+		ParserLog("In ParseForExprAST");
 		getNextToken();
 		
 		if (m_curToken.tok != lexer::tok_identifier)
-			LogError("Expected identifier after 'for' ");
+			ParserLog("Expected identifier after 'for' ");
 		
 		std::string idName = m_curToken.identifierStr;
 		
 		getNextToken();
 		
 		if (m_curToken.unknownChar != '=')
-			LogError("Expected '=' after for");
+			ParserLog("Expected '=' after for");
 		
 		getNextToken();
 		
@@ -848,7 +345,7 @@ class Parser {
 			return nullptr;
 		
 		if (m_curToken.unknownChar != ',')
-			LogError("Expected ',' after start value in for statement");
+			ParserLog("Expected ',' after start value in for statement");
 		getNextToken();
 		
 		auto End = ParseExpression();
@@ -857,7 +354,7 @@ class Parser {
 			return nullptr;
 		
 		if (m_curToken.unknownChar != ',')
-			LogError("Expected ',' after end value in for statement");
+			ParserLog("Expected ',' after end value in for statement");
 		getNextToken();
 		
 		
@@ -867,7 +364,7 @@ class Parser {
 			return nullptr;
 		
 		if (m_curToken.tok != lexer::tok_in)
-			LogError("Expected 'in' after Step in for statement");
+			ParserLog("Expected 'in' after Step in for statement");
 		
 		getNextToken();
 		
@@ -876,18 +373,18 @@ class Parser {
 		if (!Body)
 			return nullptr;
 		
-		return make_unique<ForExprAST>(idName, std::move(Start), std::move(End), std::move(Step), std::move(Body));
+		return make_shared<ForExprAST>(idName, Start, End, Step, Body);
 		
 	}
 	
-	std::unique_ptr<ExprAST> ParseVarExprAST()
+	std::shared_ptr<ExprAST> Parser::ParseVarExprAST()
 	{
 		ParserLog("In ParseVarExprAST");
-		std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
+		std::vector<std::pair<std::string, std::shared_ptr<ExprAST>>> VarNames;
 		getNextToken();
 		
 		if (m_curToken.tok != lexer::tok_identifier) {
-			LogError("Expected identifier in var expression");
+			ParserLog("Expected identifier in var expression");
 			return nullptr;
 		}
 		
@@ -895,21 +392,21 @@ class Parser {
 			std::string Name = m_curToken.identifierStr;
 			getNextToken();
 			
-			std::unique_ptr<ExprAST> Init;
+			std::shared_ptr<ExprAST> Init;
 			if (m_curToken.unknownChar == '=') {
 				getNextToken();
 				Init = ParseExpression();
 				if (!Init)
 					return nullptr;
 			}
-			VarNames.push_back(std::make_pair(Name, std::move(Init)));
+			VarNames.push_back(std::make_pair(Name, Init));
 			
 			if (m_curToken.unknownChar != ',')
 				break;
 			
 			getNextToken();
 			if (m_curToken.tok != lexer::tok_identifier) {
-				LogError("Expected identifier in var expression");
+				ParserLog("Expected identifier in var expression");
 				return nullptr;
 			}
 		}
@@ -925,38 +422,40 @@ class Parser {
 		if (!Body) 
 			return nullptr;
 		
-		return make_unique<VarExprAST>(std::move(VarNames), std::move(Body));
+		return make_shared<VarExprAST>(VarNames, Body);
 	}
 
-    std::unique_ptr<PrototypeAST> ParseExtern()
+    std::shared_ptr<PrototypeAST> Parser::ParseExtern()
     {
         getNextToken(); //consume 'extern'
         return ParsePrototype();
     }
 
-    std::unique_ptr<FunctionAST> ParseTopLevelExpr()
+    std::shared_ptr<FunctionAST> Parser::ParseTopLevelExpr()
     {
 		ParserLog("ParseTopLevelExpr");
 		//getNextToken();
         if (auto E = ParseExpression())
         {
             //make anonymous prototype
-            auto proto = make_unique<PrototypeAST>("", std::vector<std::string>());;
-            return make_unique<FunctionAST>(std::move(proto), std::move(E));
+            auto proto = make_shared<PrototypeAST>("", std::vector<std::string>());;
+            return make_shared<FunctionAST>(proto, E);
         }
         return nullptr;
     }
 
-    void HandleDefinition () {
+    void Parser::HandleDefinition () {
         ParserLog("HandleDefinition");
         if (auto FnAST = ParseDefinition())
         {
-			if (auto *FnIR = FnAST->codegen())
+			auto *FnIR = code_Gen.codegen(FnAST);
+			if (FnIR)
 			{
 				fprintf(stderr, "Parsed a function definition\n");
 				FnIR->print(errs());
 				fprintf(stderr, "\n");
 			}
+
         }
         else
         {
@@ -964,16 +463,17 @@ class Parser {
         }
     }
 
-    void HandleExtern () {
+    void Parser::HandleExtern () {
         if (auto ProtoAST = ParseExtern())
         {
-			
-			if (auto *FnIR = ProtoAST->codegen())
+			auto *FnIR = code_Gen.codegen(ProtoAST);
+			if (FnIR)
 			{
 				fprintf(stderr, "Parsed an extern\n");
 				FnIR->print(errs());
 				fprintf(stderr, "\n");
 			}
+
         }
         else
         {
@@ -981,12 +481,15 @@ class Parser {
         }
     }
 
-    void HandleTopLevelExpression () {
+    void Parser::HandleTopLevelExpression () {
 		ParserLog("HandleTopLevelExpression");
         if (auto FnAST = ParseTopLevelExpr())
         {
 			fprintf(stderr, "Parsed a top-level expression\n");
-			if (auto *FnIR = FnAST->codegen())
+			
+			auto *FnIR = code_Gen.codegen(FnAST);
+		
+			if (FnIR)
 			{
 				FnIR->print(errs());
 				fprintf(stderr, "\n");
@@ -998,8 +501,7 @@ class Parser {
         }
     }
 
-    public:
-    void MainLoop()
+    void Parser::MainLoop()
     {
         getNextToken();
         while(1)
@@ -1031,147 +533,29 @@ class Parser {
             }
         }
     }
-
-    Parser(char* fileName):lex(lexer(fileName, printLog)),m_curToken(tokStruct(lexer::tok_unknown)) {
-        BinopPrecedence = 
-        {
-			{':' ,  1},
-			{'=' ,  2},
-            {'<' , 10},
-			{'>' , 11},
-            {'+' , 20},
-            {'-' , 30},
-            {'*' , 40},
-        };
-    }
-
-};
-
-int WriteObjectFile()
-{
-	// Initialize the target registry etc.
-	InitializeAllTargetInfos();
-	InitializeAllTargets();
-	InitializeAllTargetMCs();
-	InitializeAllAsmParsers();
-	InitializeAllAsmPrinters();
 	
-	auto TargetTriple = sys::getDefaultTargetTriple();
-	TheModule->setTargetTriple(TargetTriple);
-	
-	std::string Error;
-	auto Target = TargetRegistry::lookupTarget(TargetTriple, Error);
-	
-	// Print an error and exit if we couldn't find the requested target.
-    // This generally occurs if we've forgotten to initialise the
-    // TargetRegistry or we have a bogus target triple.
-    if (!Target) {
-		errs() << Error;
-		return 1;
-    }
-	
-	auto CPU = "generic";
-    auto Features = "";
-	
-	TargetOptions opt;
-    auto RM = Optional<Reloc::Model>();
-    auto TheTargetMachine = Target->createTargetMachine(TargetTriple, CPU, Features, opt, RM);
-	TheModule->setDataLayout(TheTargetMachine->createDataLayout());
-	TheModule->setTargetTriple(TargetTriple);
-	
-	auto Filename = "output.o";
-	std::error_code EC;
-	raw_fd_ostream dest(Filename, EC);//, sys::fs::OF_None);
-
-	if (EC) {
-	  errs() << "Could not open file: " << EC.message();
-	  return 1;
-	}
-	
-	legacy::PassManager pass;
-	auto FileType = llvm::LLVMTargetMachine::CGFT_ObjectFile;
-
-	if (TheTargetMachine->addPassesToEmitFile(pass, dest, nullptr, FileType)) {
-	  errs() << "TargetMachine can't emit a file of this type";
-	  return 1;
-	}
-
-	pass.run(*TheModule);
-	dest.flush();
-	
-	return 0;
-	
-}
-
-
-// ################################# Driver Code ############################################
-int main(int argc, char* argv[])
-{
-
-    printLog = false;
-	std::string irFile = "ex.ll";
-	char *fileName;
-	bool srcProvided = false;
-    for (int i = 1; i < argc; ++i) {
-		if (std::string(argv[i]) == "--help") {
-            std::cout << "Usage: ./a.exe --log<optional>:turn on logging\n"
-			            << "               --ir-dump<optional> file for ir dump; ex.ll by default\n"
-						<< "               --src<compulsory> source file\n";
-			return 0;
-        }
-        else if (std::string(argv[i]) == "--log") {
-            printLog = true;
-        }
-		else if (std::string(argv[i]) == "--ir-dump") {
-			if (i + 1 < argc) {
-				i++;
-				irFile = std::string(argv[i]);
-			}
-			else {
-				std::cerr << "--ir-dump requires a destination file" << std::endl;
-				return 1;
-			}
-		}
-		else if (std::string(argv[i]) == "--src") {
-			srcProvided = true;
-			if (i + 1 < argc) {
-				i++;
-				fileName = argv[i];
-			}
-			else {
-				std::cerr << "--src requires a destination file" << std::endl;
-				return 1;
-			}
-		}
-    }
-	
-	if (!srcProvided)
+	Parser::Parser(char* fileName, bool _printLog):lex(lexer(fileName, printLog)),m_curToken(tokStruct(lexer::tok_unknown)), printLog(_printLog) , code_Gen(Code_Gen(_printLog)){
+	BinopPrecedence = 
 	{
-		std::cerr << "No source file provided" << std::endl;
-		return 1;
-	}
-    
-    Parser ps(fileName);
-	TheModule = make_unique<Module>("my cool jit", TheContext);
-    ps.MainLoop();
+		{':' ,  1},
+		{'=' ,  2},
+		{'<' , 10},
+		{'>' , 11},
+		{'+' , 20},
+		{'-' , 30},
+		{'*' , 40},
+	};
+	//Code_Gen code_Gen(_printLog);
+    }
 	
-	std::ofstream irDump(irFile);
-	std::string irString;
-	raw_string_ostream OS(irString);
-	OS << *TheModule;
-	OS.flush();
-	
-	irDump << irString;
-	irDump.close();
-	
-	if (!WriteObjectFile()) {
-		std::cout << "Object file written to output.o" << std::endl;
+	void Parser::ParserLog(std::string str) 
+	{
+		if (printLog) 
+		{
+			std::cout << "Parser " << str << std::endl;
+		}
 	}
-	else {
-		std::cout << "Error writing object file" << std::endl;
-	}
+
+
+
 }
-
-
-
-
