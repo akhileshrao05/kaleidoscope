@@ -12,13 +12,15 @@ It supports binary operations : +,-,*,/,<,>
 It supports functions, control flow: for loops and if/then/else statements.
 You can write programs like:</br>
 
-<code>
-//Compute the x'th fibonacci number.
+</code>
+<pre>
+Compute the x'th fibonacci number.<br>
 def fib(x)<br>
   if x < 3 then<br>
     1<br>
   else<br>
     fib(x-1)+fib(x-2)<br>
+</pre>
 </code>
 
 
